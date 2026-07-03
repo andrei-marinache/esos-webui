@@ -24,6 +24,8 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
 
 # Build Nuxt → .output/
+# Raise Node heap: the stock ~2GB old-space cap OOMs during `nuxt build`.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
 # ─── Stage 2 : Runner ────────────────────────────────────────────

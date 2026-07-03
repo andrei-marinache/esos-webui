@@ -1,0 +1,120 @@
+# ── Image ────────────────────────────────────────────────────────────────────
+# You build & push this yourself (there is no upstream published image).
+#   docker build -t ghcr.io/andrei-marinache/esos-webui:1.0.2 . && docker push ...
+image:
+  repository: ghcr.io/andrei-marinache/esos-webui
+  tag: ""            # defaults to .Chart.appVersion (1.0.2) when empty
+  pullPolicy: IfNotPresent
+imagePullSecrets: []  # e.g. [{ name: ghcr-creds }] for a private GHCR package
+
+# SQLite is single-writer — DO NOT raise this. Strategy is forced to Recreate.
+replicaCount: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Non-secret config (rendered into a ConfigMap → env) ──────────────────────
+config:
+  ssh:
+    host: ""          # NUXT_SSH_HOST  — ESOS host to manage
+    port: "22"        # NUXT_SSH_PORT
+    user: ""          # NUXT_SSH_USER
+  dbPath: /app/data/esos-webui.db   # DB_PATH (must live under the PVC mount)
+  cookieSecure: true                # NUXT_COOKIE_SECURE — true because Ingress terminates TLS
+  sshStatusPollMs: "30000"          # NUXT_PUBLIC_SSH_STATUS_POLL_MS (min 10000)
+  scstConfPath: /etc/scst.conf      # SCST_CONF_PATH
+  scstSysfsPath: /sys/kernel/scst_tgt  # SCST_SYSFS_PATH
+
+# Optional tuning / extra env — plain key:value map (env var name → value).
+# LDAP providers themselves are configured in the admin UI and stored ENCRYPTED
+# in the DB (NUXT_ENCRYPTION_KEY) — they are NOT set here. These are only knobs:
+extraEnv: {}
+  # LDAP_SEARCH_SIZE_LIMIT: "1000"
+  # LDAP_AUTH_EVENT_RETENTION_DAYS: "90"
+  # NUXT_GITHUB_CACHE_TTL_MS: "21600000"
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Two modes:
+#   1) create: true  → chart renders a Secret from the plaintext values below.
+#   2) create: false + existingSecret: <name> → use a Secret managed elsewhere
+#      (e.g. External Secrets Operator). Its keys MUST be named exactly as the
+#      env vars below (NUXT_ENCRYPTION_KEY, NUXT_JWT_SECRET, NUXT_SSH_PRIVATE_KEY,
+#      NUXT_SSH_PASSWORD, NUXT_OIDC_STATE_PEPPER, NUXT_GITHUB_TOKEN).
+secrets:
+  create: true
+  existingSecret: ""
+
+  # Used only when create: true. Blank values are omitted from the Secret.
+  # Generate keys with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  encryptionKey: ""    # NUXT_ENCRYPTION_KEY  — AES-256 master key (required once any SAN/credential is stored)
+  jwtSecret: ""        # NUXT_JWT_SECRET      — HMAC for session JWTs (>=32 chars)
+  oidcStatePepper: ""  # NUXT_OIDC_STATE_PEPPER (optional)
+  githubToken: ""      # NUXT_GITHUB_TOKEN      (optional)
+
+  # ESOS-host SSH auth — provide ONE of:
+  sshPrivateKey: ""    # NUXT_SSH_PRIVATE_KEY — base64 of the private key: base64 -w0 ~/.ssh/id_esos
+  sshPassword: ""      # NUXT_SSH_PASSWORD    — password fallback (discouraged)
+
+# ── Persistence ──────────────────────────────────────────────────────────────
+# One RWO PVC, mounted at both /app/data (SQLite + deployment catalog) and
+# /opt/esos-webui/binaries (binary catalog) via subPath.
+persistence:
+  enabled: true
+  existingClaim: ""       # reuse a claim instead of creating one
+  storageClassName: ""    # "" = cluster default; set to pin a class
+  accessMode: ReadWriteOnce
+  size: 5Gi
+
+# ── Service ──────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 3000
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  host: esos-webui.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    secretName: ""   # existing TLS secret (e.g. from cert-manager)
+
+# ── Scheduling / resources ───────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Runs as the image's non-root user (UID/GID 1000). fsGroup lets it write the PVC.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
