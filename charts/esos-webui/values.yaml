@@ -28,7 +28,12 @@ config:
 # Optional tuning / extra env — plain key:value map (env var name → value).
 # LDAP providers themselves are configured in the admin UI and stored ENCRYPTED
 # in the DB (NUXT_ENCRYPTION_KEY) — they are NOT set here. These are only knobs:
-extraEnv: {}
+extraEnv:
+  # The image enables trusted-header SSO by default: an X-Remote-User header from any
+  # private-IP peer (e.g. the Ingress controller) logs in with no password. Keep it off
+  # unless a proxy that overwrites X-Remote-User sits in front of the app.
+  AUTH_HEADER_ENABLED: "false"
+  AUTH_HEADER_BOOTSTRAP: "false"
   # LDAP_SEARCH_SIZE_LIMIT: "1000"
   # LDAP_AUTH_EVENT_RETENTION_DAYS: "90"
   # NUXT_GITHUB_CACHE_TTL_MS: "21600000"
