@@ -93,7 +93,7 @@ resources:
     cpu: 100m
     memory: 128Mi
   limits:
-    cpu: 500m
+    cpu: 2000m       # 500m throttled ~23% of periods in steady state
     memory: 256Mi
 
 nodeSelector: {}
@@ -117,9 +117,11 @@ livenessProbe:
     port: http
   initialDelaySeconds: 10
   periodSeconds: 30
+  timeoutSeconds: 5  # default 1s: a short SQLite stall on NFS was enough to restart the pod
 readinessProbe:
   httpGet:
     path: /api/health
     port: http
   initialDelaySeconds: 5
+  timeoutSeconds: 5
   periodSeconds: 10
