@@ -10,8 +10,10 @@ import type { UserRole } from './types'
 import type { AuthMfaMode } from './auth-providers-role-map'
 import { parseUserRole } from './auth-providers-role-map'
 import {
+  evaluateHeaderAvailability,
   evaluateLdapAvailability,
   evaluateOidcAvailability,
+  isHeaderAuthConfigSufficient,
   isLdapConfigSufficientForLogin,
   isOidcConfigSufficientForLogin,
   type ProviderLoginSummary,
@@ -41,13 +43,25 @@ export const AUTH_PROVIDER_DEFAULTS: Array<{ key: string; value: string; type: '
   { key: 'oidc.redirect_path', value: '/api/auth/oidc/callback', type: 'string' },
   { key: 'oidc.clock_skew_sec', value: '60', type: 'number' },
 
-  { key: 'auth.jit.enabled', value: 'false', type: 'boolean' },
+  { key: 'auth.jit.enabled', value: 'true', type: 'boolean' },
   { key: 'auth.jit.default_role', value: 'viewer', type: 'string' },
   { key: 'auth.jit.default_active', value: 'true', type: 'boolean' },
   { key: 'auth.mfa.mode', value: 'off', type: 'string' },
   { key: 'auth.mapping_rules_json', value: '[]', type: 'string' },
   { key: 'auth.oidc.max_role', value: '', type: 'string' },
   { key: 'auth.ldap.max_role', value: '', type: 'string' },
+  { key: 'auth.header.max_role', value: '', type: 'string' },
+
+  { key: 'header_auth.enabled', value: 'true', type: 'boolean' },
+  { key: 'header_auth.user_header', value: 'X-Remote-User', type: 'string' },
+  { key: 'header_auth.email_header', value: 'X-Remote-Email', type: 'string' },
+  { key: 'header_auth.groups_header', value: 'X-Remote-Groups', type: 'string' },
+  { key: 'header_auth.groups_delimiter', value: ',', type: 'string' },
+  { key: 'header_auth.display_name_header', value: 'X-Remote-Name', type: 'string' },
+  { key: 'header_auth.issuer', value: 'bastion-pro', type: 'string' },
+  { key: 'header_auth.token_header', value: 'X-ESOS-Auth-Token', type: 'string' },
+  { key: 'header_auth.internal_token', value: '', type: 'secret' },
+  { key: 'header_auth.require_internal_token', value: 'false', type: 'boolean' },
 ]
 
 export async function ensureAuthProviderDefaultSettings(): Promise<void> {
@@ -59,13 +73,32 @@ export async function ensureAuthProviderDefaultSettings(): Promise<void> {
   }
 }
 
+/**
+ * Force Bastion header SSO + JIT on existing DBs (image upgrade path).
+ * Idempotent — safe on every boot when AUTH_HEADER_BOOTSTRAP is not false.
+ */
+export async function bootstrapBastionHeaderAuthSettings(): Promise<void> {
+  const { envFlagTrue } = await import('./auth-env-flags')
+  // Opt-in: Dockerfile sets AUTH_HEADER_BOOTSTRAP=true for Bastion deployments.
+  if (!envFlagTrue('AUTH_HEADER_BOOTSTRAP')) return
+  await ensureAuthProviderDefaultSettings()
+  await setSetting('header_auth.enabled', 'true', 'boolean')
+  await setSetting('header_auth.require_internal_token', 'false', 'boolean')
+  await setSetting('header_auth.user_header', 'X-Remote-User', 'string')
+  await setSetting('header_auth.email_header', 'X-Remote-Email', 'string')
+  await setSetting('header_auth.groups_header', 'X-Remote-Groups', 'string')
+  await setSetting('header_auth.display_name_header', 'X-Remote-Name', 'string')
+  await setSetting('header_auth.issuer', 'bastion-pro', 'string')
+  await setSetting('auth.jit.enabled', 'true', 'boolean')
+}
+
 function bool(s: string | undefined, d: boolean): boolean {
   if (s == null || s === '') return d
   return s === 'true' || s === '1'
 }
 
 function int(s: string | undefined, d: number): number {
-  const n = parseInt(s ?? '', 10)
+  const n = Number.parseInt(s ?? '', 10)
   return Number.isFinite(n) ? n : d
 }
 
@@ -74,14 +107,17 @@ export interface AdminAuthProvidersSummary {
     local: number
     ldap:  number
     oidc:  number
+    header: number
   }
   config: {
     ldapComplete: boolean
     oidcComplete: boolean
+    headerComplete: boolean
   }
   login: {
     ldap: ProviderLoginSummary
     oidc: ProviderLoginSummary
+    header: ProviderLoginSummary
   }
 }
 
@@ -112,6 +148,19 @@ export interface AdminAuthProvidersDto {
     redirectPath:      string
     clockSkewSec:      number
   }
+  header: {
+    enabled:              boolean
+    userHeader:           string
+    emailHeader:          string
+    groupsHeader:         string
+    groupsDelimiter:      string
+    displayNameHeader:    string
+    issuer:               string
+    tokenHeader:          string
+    internalTokenSet:     boolean
+    /** When true, shared token is mandatory. When false, private-proxy peer + identity header is enough. */
+    requireInternalToken: boolean
+  }
   auth: {
     jitEnabled:        boolean
     jitDefaultRole:    UserRole
@@ -120,6 +169,7 @@ export interface AdminAuthProvidersDto {
     mappingRulesJson:  string
     oidcMaxRole:       UserRole | null
     ldapMaxRole:       UserRole | null
+    headerMaxRole:     UserRole | null
   }
 }
 
@@ -132,6 +182,7 @@ export async function buildAdminAuthProvidersDto(): Promise<AdminAuthProvidersDt
 
   const oidcMaxRaw = (s['auth.oidc.max_role'] ?? '').trim()
   const ldapMaxRaw = (s['auth.ldap.max_role'] ?? '').trim()
+  const headerMaxRaw = (s['auth.header.max_role'] ?? '').trim()
 
   const ldap = {
       enabled:            bool(s['ldap.enabled'], false),
@@ -158,24 +209,49 @@ export async function buildAdminAuthProvidersDto(): Promise<AdminAuthProvidersDt
       clockSkewSec:     int(s['oidc.clock_skew_sec'], 60),
     }
 
+  const {
+    resolveHeaderAuthEnabled,
+    resolveHeaderIssuer,
+    resolveHeaderTrustWithoutToken,
+    resolveHeaderUserHeader,
+    resolveJitEnabled,
+  } = await import('./auth-env-flags')
+
+  const headerRequireTokenDb = bool(s['header_auth.require_internal_token'], false)
+  const header = {
+      enabled:              resolveHeaderAuthEnabled(bool(s['header_auth.enabled'], false)),
+      userHeader:           resolveHeaderUserHeader(s['header_auth.user_header']),
+      emailHeader:          s['header_auth.email_header'] ?? 'X-Remote-Email',
+      groupsHeader:         s['header_auth.groups_header'] ?? 'X-Remote-Groups',
+      groupsDelimiter:      s['header_auth.groups_delimiter'] ?? ',',
+      displayNameHeader:    s['header_auth.display_name_header'] ?? 'X-Remote-Name',
+      issuer:               resolveHeaderIssuer(s['header_auth.issuer']),
+      tokenHeader:          s['header_auth.token_header'] ?? 'X-ESOS-Auth-Token',
+      internalTokenSet:     (s['header_auth.internal_token'] ?? '') === '***',
+      // Stored as "require"; DTO exposes requireInternalToken. Env can force trust-without-token.
+      requireInternalToken: !resolveHeaderTrustWithoutToken(headerRequireTokenDb),
+    }
+
   const auth = {
-      jitEnabled:       bool(s['auth.jit.enabled'], false),
+      jitEnabled:       resolveJitEnabled(bool(s['auth.jit.enabled'], false)),
       jitDefaultRole:   parseUserRole(s['auth.jit.default_role'], 'viewer'),
       jitDefaultActive: bool(s['auth.jit.default_active'], true),
       mfaMode,
       mappingRulesJson: s['auth.mapping_rules_json'] ?? '[]',
       oidcMaxRole:      oidcMaxRaw === '' ? null : parseUserRole(oidcMaxRaw, 'viewer'),
       ldapMaxRole:      ldapMaxRaw === '' ? null : parseUserRole(ldapMaxRaw, 'viewer'),
+      headerMaxRole:    headerMaxRaw === '' ? null : parseUserRole(headerMaxRaw, 'viewer'),
     }
 
-  const [localCount, ldapCount, oidcCount] = await Promise.all([
+  const [localCount, ldapCount, oidcCount, headerCount] = await Promise.all([
     countActiveUsersByAuthSource('local'),
     countActiveUsersByAuthSource('ldap'),
     countActiveUsersByAuthSource('oidc'),
+    countActiveUsersByAuthSource('header'),
   ])
 
-  const counts = { local: localCount, ldap: ldapCount, oidc: oidcCount }
-  const dtoBody = { ldap, oidc, auth }
+  const counts = { local: localCount, ldap: ldapCount, oidc: oidcCount, header: headerCount }
+  const dtoBody = { ldap, oidc, header, auth }
 
   return {
     summary: {
@@ -183,10 +259,12 @@ export async function buildAdminAuthProvidersDto(): Promise<AdminAuthProvidersDt
       config: {
         ldapComplete: isLdapConfigSufficientForLogin(ldap),
         oidcComplete: isOidcConfigSufficientForLogin(oidc),
+        headerComplete: isHeaderAuthConfigSufficient(header),
       },
       login: {
         ldap: evaluateLdapAvailability(dtoBody, counts),
         oidc: evaluateOidcAvailability(dtoBody, counts),
+        header: evaluateHeaderAvailability(dtoBody, counts),
       },
     },
     ...dtoBody,
@@ -197,12 +275,14 @@ export async function buildAdminAuthProvidersDto(): Promise<AdminAuthProvidersDt
 export async function loadAuthProviderSecretsForServer(): Promise<{
   ldapBindPassword: string | null
   oidcClientSecret: string | null
+  headerInternalToken: string | null
 }> {
-  const [ldapBindPassword, oidcClientSecret] = await Promise.all([
+  const [ldapBindPassword, oidcClientSecret, headerInternalToken] = await Promise.all([
     getSetting('ldap.bind_password'),
     getSetting('oidc.client_secret'),
+    getSetting('header_auth.internal_token'),
   ])
-  return { ldapBindPassword, oidcClientSecret }
+  return { ldapBindPassword, oidcClientSecret, headerInternalToken }
 }
 
 export type AuthProvidersPatchBody = Partial<{
@@ -229,6 +309,18 @@ export type AuthProvidersPatchBody = Partial<{
     redirectPath: string
     clockSkewSec: number
   }>
+  header: Partial<{
+    enabled: boolean
+    userHeader: string
+    emailHeader: string
+    groupsHeader: string
+    groupsDelimiter: string
+    displayNameHeader: string
+    issuer: string
+    tokenHeader: string
+    internalToken: string
+    requireInternalToken: boolean
+  }>
   auth: Partial<{
     jitEnabled: boolean
     jitDefaultRole: UserRole
@@ -237,6 +329,7 @@ export type AuthProvidersPatchBody = Partial<{
     mappingRulesJson: string
     oidcMaxRole: UserRole | '' | null
     ldapMaxRole: UserRole | '' | null
+    headerMaxRole: UserRole | '' | null
   }>
 }>
 
@@ -292,6 +385,50 @@ export async function applyAuthProvidersPatch(body: AuthProvidersPatchBody): Pro
     if (L.timeoutSec !== undefined) {
       await setSetting('ldap.timeout_sec', String(L.timeoutSec), 'number')
       updated.push('ldap.timeout_sec')
+    }
+  }
+
+  if (body.header) {
+    const H = body.header
+    if (H.enabled !== undefined) {
+      await setSetting('header_auth.enabled', String(H.enabled), 'boolean')
+      updated.push('header_auth.enabled')
+    }
+    if (H.userHeader !== undefined) {
+      await setSetting('header_auth.user_header', H.userHeader.trim(), 'string')
+      updated.push('header_auth.user_header')
+    }
+    if (H.emailHeader !== undefined) {
+      await setSetting('header_auth.email_header', H.emailHeader.trim(), 'string')
+      updated.push('header_auth.email_header')
+    }
+    if (H.groupsHeader !== undefined) {
+      await setSetting('header_auth.groups_header', H.groupsHeader.trim(), 'string')
+      updated.push('header_auth.groups_header')
+    }
+    if (H.groupsDelimiter !== undefined) {
+      await setSetting('header_auth.groups_delimiter', H.groupsDelimiter, 'string')
+      updated.push('header_auth.groups_delimiter')
+    }
+    if (H.displayNameHeader !== undefined) {
+      await setSetting('header_auth.display_name_header', H.displayNameHeader.trim(), 'string')
+      updated.push('header_auth.display_name_header')
+    }
+    if (H.issuer !== undefined) {
+      await setSetting('header_auth.issuer', H.issuer.trim(), 'string')
+      updated.push('header_auth.issuer')
+    }
+    if (H.tokenHeader !== undefined) {
+      await setSetting('header_auth.token_header', H.tokenHeader.trim(), 'string')
+      updated.push('header_auth.token_header')
+    }
+    if (H.internalToken !== undefined && H.internalToken !== '') {
+      await setSetting('header_auth.internal_token', H.internalToken, 'secret')
+      updated.push('header_auth.internal_token')
+    }
+    if (H.requireInternalToken !== undefined) {
+      await setSetting('header_auth.require_internal_token', String(H.requireInternalToken), 'boolean')
+      updated.push('header_auth.require_internal_token')
     }
   }
 
@@ -372,6 +509,14 @@ export async function applyAuthProvidersPatch(body: AuthProvidersPatchBody): Pro
       }
       await setSetting('auth.ldap.max_role', v, 'string')
       updated.push('auth.ldap.max_role')
+    }
+    if (A.headerMaxRole !== undefined) {
+      const v = A.headerMaxRole === '' || A.headerMaxRole == null ? '' : A.headerMaxRole
+      if (v && v !== 'admin' && v !== 'operator' && v !== 'viewer') {
+        throw createError({ statusCode: 400, message: 'auth.header.max_role invalide' })
+      }
+      await setSetting('auth.header.max_role', v, 'string')
+      updated.push('auth.header.max_role')
     }
   }
 

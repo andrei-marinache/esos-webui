@@ -98,7 +98,20 @@ export function parseProcDRBD(raw: string): DRBDResource[] {
   if (!raw || raw.trim() === '' || raw.includes('DRBD_UNAVAILABLE')) return []
 
   const resources: DRBDResource[] = []
-  const blocks = raw.split(/\n(?=\s*\d+:)/)
+  const blocks: string[] = []
+  {
+    const lines = raw.split('\n')
+    let cur: string[] = []
+    for (const line of lines) {
+      if (/^\s*\d+:/.test(line) && cur.length) {
+        blocks.push(cur.join('\n'))
+        cur = [line]
+      } else {
+        cur.push(line)
+      }
+    }
+    if (cur.length) blocks.push(cur.join('\n'))
+  }
 
   for (const block of blocks) {
     const firstLine = block.split('\n').find(l => /^\s*\d+:/.test(l))
@@ -115,19 +128,19 @@ export function parseProcDRBD(raw: string): DRBDResource[] {
     const peerDiskState = mapDiskState(dsMatch?.[2] ?? 'DUnknown')
 
     const statsLine = block.split('\n').find(l => /ns:\d+/.test(l)) ?? ''
-    const nr        = parseInt(statsLine.match(/nr:(\d+)/)?.[1] ?? '0')
-    const dw        = parseInt(statsLine.match(/dw:(\d+)/)?.[1] ?? '0')
+    const nr        = Number.parseInt(statsLine.match(/nr:(\d+)/)?.[1] ?? '0')
+    const dw        = Number.parseInt(statsLine.match(/dw:(\d+)/)?.[1] ?? '0')
 
     const syncLine    = block.split('\n').find(l => l.includes("sync'ed:"))
     const syncMatch   = syncLine?.match(/sync'ed:\s+([\d.]+)%.*\((\d+)\/(\d+)\)/)
-    const syncPercent = syncMatch ? parseFloat(syncMatch[1]) : 100
-    const outOfSync   = syncMatch ? parseInt(syncMatch[2]) : 0
+    const syncPercent = syncMatch ? Number.parseFloat(syncMatch[1]) : 100
+    const outOfSync   = syncMatch ? Number.parseInt(syncMatch[2]) : 0
     const isSyncing   = ['SyncSource', 'SyncTarget', 'PausedSyncS', 'PausedSyncT'].includes(connState)
 
     const etaLine    = block.split('\n').find(l => l.includes('finish:'))
     const etaMatch   = etaLine?.match(/finish:\s+(\d+):(\d+):(\d+)/)
     const etaSeconds = etaMatch
-      ? parseInt(etaMatch[1]) * 3600 + parseInt(etaMatch[2]) * 60 + parseInt(etaMatch[3])
+      ? Number.parseInt(etaMatch[1]) * 3600 + Number.parseInt(etaMatch[2]) * 60 + Number.parseInt(etaMatch[3])
       : null
 
     const idxMatch = firstLine.match(/^\s*(\d+):/)

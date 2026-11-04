@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { AdminAuthProvidersDto } from '../server/utils/auth-providers-config'
 import {
   buildPublicAuthProviders,
+  isHeaderLoginAvailable,
   isLdapConfigSufficientForLogin,
   isLdapLoginAvailable,
   isOidcConfigSufficientForLogin,
@@ -13,11 +14,12 @@ import {
 import { createError } from 'h3'
 
 const defaultSummary = {
-  counts: { local: 1, ldap: 0, oidc: 0 },
-  config: { ldapComplete: false, oidcComplete: false },
+  counts: { local: 1, ldap: 0, oidc: 0, header: 0 },
+  config: { ldapComplete: false, oidcComplete: false, headerComplete: false },
   login: {
     ldap: { available: false, reason: 'disabled' as const },
     oidc: { available: false, reason: 'disabled' as const },
+    header: { available: false, reason: 'disabled' as const },
   },
 }
 
@@ -47,6 +49,18 @@ function baseDto(overrides?: Partial<AdminAuthProvidersDto>): AdminAuthProviders
       redirectPath:     '/api/auth/oidc/callback',
       clockSkewSec:     60,
     },
+    header: {
+      enabled:              false,
+      userHeader:           'X-Remote-User',
+      emailHeader:          'X-Remote-Email',
+      groupsHeader:         'X-Remote-Groups',
+      groupsDelimiter:      ',',
+      displayNameHeader:    'X-Remote-Name',
+      issuer:               'bastion-pro',
+      tokenHeader:          'X-ESOS-Auth-Token',
+      internalTokenSet:     false,
+      requireInternalToken: false,
+    },
     auth: {
       jitEnabled:       false,
       jitDefaultRole:   'viewer',
@@ -55,12 +69,13 @@ function baseDto(overrides?: Partial<AdminAuthProvidersDto>): AdminAuthProviders
       mappingRulesJson: '[]',
       oidcMaxRole:      null,
       ldapMaxRole:      null,
+      headerMaxRole:    null,
     },
     ...overrides,
   }
 }
 
-const zeroCounts = { ldap: 0, oidc: 0 }
+const zeroCounts = { ldap: 0, oidc: 0, header: 0 }
 
 describe('auth-providers-public', () => {
   it('local is always available', () => {
@@ -68,6 +83,50 @@ describe('auth-providers-public', () => {
     const local = res.providers.find((p) => p.key === 'local')
     expect(local?.available).toBe(true)
     expect(res.defaultProvider).toBe('local')
+  })
+
+  it('header available with complete config and JIT', () => {
+    const dto = baseDto({
+      header: {
+        ...baseDto().header,
+        enabled:          true,
+        internalTokenSet: true,
+      },
+      auth: { ...baseDto().auth, jitEnabled: true },
+    })
+    const res = buildPublicAuthProviders(dto, zeroCounts)
+    const header = res.providers.find((p) => p.key === 'header')
+    expect(header?.available).toBe(true)
+    expect(header?.loginUrl).toBe('/api/auth/header/session')
+    expect(res.defaultProvider).toBe('header')
+  })
+
+  it('header available without token when requireInternalToken is false', () => {
+    const dto = baseDto({
+      header: {
+        ...baseDto().header,
+        enabled:              true,
+        internalTokenSet:     false,
+        requireInternalToken: false,
+      },
+      auth: { ...baseDto().auth, jitEnabled: true },
+    })
+    expect(isHeaderLoginAvailable(dto, zeroCounts)).toBe(true)
+  })
+
+  it('header unavailable without internal token when required', () => {
+    const dto = baseDto({
+      header: {
+        ...baseDto().header,
+        enabled:              true,
+        internalTokenSet:     false,
+        requireInternalToken: true,
+      },
+      auth: { ...baseDto().auth, jitEnabled: true },
+    })
+    expect(isHeaderLoginAvailable(dto, zeroCounts)).toBe(false)
+    expect(buildPublicAuthProviders(dto, zeroCounts).providers.find((p) => p.key === 'header')?.reason)
+      .toBe('config_incomplete')
   })
 
   it('ldap available when enabled, config complete, and JIT on', () => {
@@ -99,7 +158,7 @@ describe('auth-providers-public', () => {
         baseDn:          'dc=example,dc=com',
       },
     })
-    const res = buildPublicAuthProviders(dto, { ldap: 1, oidc: 0 })
+    const res = buildPublicAuthProviders(dto, { ldap: 1, oidc: 0, header: 0 })
     expect(res.providers.find((p) => p.key === 'ldap')).toMatchObject({ available: true })
   })
 
@@ -168,8 +227,15 @@ describe('auth-providers-public', () => {
       .toBe('config_incomplete')
   })
 
-  it('defaultProvider prefers local then ldap then oidc', () => {
-    const dto = baseDto({
+  it('defaultProvider prefers oidc over local when SSO is available', () => {
+    const withOidc = baseDto({
+      oidc: {
+        ...baseDto().oidc,
+        enabled:         true,
+        issuer:          'https://idp.example.com',
+        clientId:        'esos',
+        clientSecretSet: true,
+      },
       ldap: {
         ...baseDto().ldap,
         enabled:         true,
@@ -180,7 +246,8 @@ describe('auth-providers-public', () => {
       },
       auth: { ...baseDto().auth, jitEnabled: true },
     })
-    expect(buildPublicAuthProviders(dto, zeroCounts).defaultProvider).toBe('local')
+    expect(buildPublicAuthProviders(withOidc, zeroCounts).defaultProvider).toBe('oidc')
+
     const ldapOnly = baseDto({
       ldap: {
         ...baseDto().ldap,
@@ -192,9 +259,7 @@ describe('auth-providers-public', () => {
       },
       auth: { ...baseDto().auth, jitEnabled: true },
     })
-    // Simulate hypothetical future without local — counts with ldap users
-    const res = buildPublicAuthProviders(ldapOnly, { ldap: 1, oidc: 0 })
-    expect(res.defaultProvider).toBe('local')
+    expect(buildPublicAuthProviders(ldapOnly, { ldap: 1, oidc: 0, header: 0 }).defaultProvider).toBe('local')
   })
 
   it('response shape never includes secret fields', () => {
@@ -209,7 +274,7 @@ describe('auth-providers-public', () => {
       },
       auth: { ...baseDto().auth, jitEnabled: true },
     })
-    const json = JSON.stringify(buildPublicAuthProviders(dto, { ldap: 2, oidc: 1 }))
+    const json = JSON.stringify(buildPublicAuthProviders(dto, { ldap: 2, oidc: 1, header: 0 }))
     expect(json).not.toMatch(/bindPassword|clientSecret|bind_dn/i)
     expect(json).not.toContain('clientId')
   })
@@ -225,7 +290,7 @@ describe('auth-providers-public', () => {
         baseDn:          'dc=x',
       },
     })
-    expect(isLdapLoginAvailable(dto, { ldap: 1, oidc: 0 })).toBe(true)
+    expect(isLdapLoginAvailable(dto, { ldap: 1, oidc: 0, header: 0 })).toBe(true)
     expect(isLdapLoginAvailable(dto, zeroCounts)).toBe(false)
   })
 
@@ -239,7 +304,7 @@ describe('auth-providers-public', () => {
         clientSecretSet: true,
       },
     })
-    expect(isOidcLoginAvailable(dto, { ldap: 0, oidc: 3 })).toBe(true)
+    expect(isOidcLoginAvailable(dto, { ldap: 0, oidc: 3, header: 0 })).toBe(true)
   })
 
   it('isLdapConfigSufficientForLogin requires filter', () => {

@@ -10,7 +10,7 @@ import type { CreateUserInput, UpdateUserInput, UserPublic, UserRole } from '../
  */
 
 export type UserRow = typeof users.$inferSelect
-export type AuthSource = 'local' | 'ldap' | 'oidc'
+export type AuthSource = 'local' | 'ldap' | 'oidc' | 'header'
 
 // ─── Lecture ─────────────────────────────────────────────────────────────────
 
@@ -333,10 +333,10 @@ export function linkUserToFederatedIdentity(
   authSource: AuthSource,
   issuer: string,
   subject: string,
-): Promise<void> {
+): void {
   const db  = getDB()
   const now = new Date().toISOString()
-  if (authSource !== 'oidc' && authSource !== 'ldap') {
+  if (authSource !== 'oidc' && authSource !== 'ldap' && authSource !== 'header') {
     throw new Error('linkUserToFederatedIdentity: source invalide')
   }
   db.update(users)

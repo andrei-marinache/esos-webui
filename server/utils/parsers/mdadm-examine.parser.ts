@@ -32,8 +32,8 @@ export function parseMdadmExamineOutput(raw: string): MdExamineInfo | undefined 
     uuid: parseExamineValue(trimmed, 'Array UUID') ?? parseExamineValue(trimmed, 'UUID'),
     name: parseExamineValue(trimmed, 'Name'),
     raidLevel: parseExamineValue(trimmed, 'Raid Level')?.replace(/^raid/i, ''),
-    raidDevices: parseInt(parseExamineValue(trimmed, 'Raid Devices') ?? '', 10) || undefined,
-    events: parseInt(parseExamineValue(trimmed, 'Events') ?? '', 10) || undefined,
+    raidDevices: Number.parseInt(parseExamineValue(trimmed, 'Raid Devices') ?? '', 10) || undefined,
+    events: Number.parseInt(parseExamineValue(trimmed, 'Events') ?? '', 10) || undefined,
     state: parseExamineValue(trimmed, 'State')?.toLowerCase(),
     raw: trimmed.slice(0, 2000),
   }
@@ -52,10 +52,9 @@ export function parseMdadmExamineBulk(output: string): Map<string, MdExamineInfo
   }
 
   for (const line of output.split('\n')) {
-    const marker = line.match(/^---DEVICE\s+(.+)---$/)
-    if (marker) {
+    if (line.startsWith('---DEVICE ') && line.endsWith('---')) {
       flush()
-      current = marker[1].trim()
+      current = line.slice('---DEVICE '.length, -3).trim()
       buffer = []
       continue
     }

@@ -1,11 +1,14 @@
+import { compareByLocale } from '~/utils/locale-sort'
+
 const inFlight = new Map<string, Promise<unknown>>()
 
 /**
  * Coalesce concurrent async work by key (e.g. same API URL).
  */
 export function singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const existing = inFlight.get(key) as Promise<T> | undefined
-  if (existing) return existing
+  if (inFlight.has(key)) {
+    return inFlight.get(key) as Promise<T>
+  }
 
   const promise = fn().finally(() => {
     inFlight.delete(key)
@@ -15,7 +18,9 @@ export function singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export function singleFlightKey(url: string, query?: Record<string, unknown>): string {
-  const q = query ? JSON.stringify(query, Object.keys(query).sort()) : ''
+  const q = query
+    ? JSON.stringify(query, Object.keys(query).sort(compareByLocale))
+    : ''
   return `${url}?${q}`
 }
 

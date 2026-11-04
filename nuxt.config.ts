@@ -52,10 +52,31 @@ export default defineNuxtConfig({
     experimental: {
       websocket: true,
     },
-    // better-sqlite3 ships a native .node binding — must stay external
-    // (bundling would break the require() of the prebuilt binary).
+    // Native bindings (.node) must stay external and NFT-traced into
+    // .output/server/node_modules for the Docker runner (copies .output only).
+    // Do NOT enable legacyExternals: it rewrites imports to absolute host paths
+    // like /app/node_modules/fnv1a-64 which do not exist in the runner image.
     externals: {
-      external: ['better-sqlite3', 'argon2'],
+      external: ['better-sqlite3', 'argon2', 'ssh2', 'cpu-features'],
+    },
+    rollupConfig: {
+      plugins: [
+        {
+          name: 'ignore-native-node-addons',
+          // Prevent Rollup from parsing optional ssh2/cpu-features .node binaries.
+          load(id: string) {
+            if (id.endsWith('.node')) {
+              return 'export default null'
+            }
+          },
+        },
+      ],
+    },
+    hooks: {
+      compiled() {
+        // Safety net: ensure native runtime deps are present even if NFT misses them.
+        return import('./scripts/copy-native-server-deps.mjs')
+      },
     },
   },
   app: {

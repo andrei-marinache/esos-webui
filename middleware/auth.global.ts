@@ -3,17 +3,44 @@ import { useAuthStore } from '~/stores/auth'
 /**
  * Garde de routes globale (cf. SDD v2.1 §10.2).
  *
- * - Hors `/login`, exige une session valide.
- * - Si `forcePasswordChange` actif, force le passage par
- *   `/admin/change-password`.
+ * - Tente le SSO Bastion (headers) avant toute redirection /login.
+ * - Si déjà authentifié sur /login → renvoie vers /.
+ * - Si `forcePasswordChange` actif, force `/admin/change-password`.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  if (to.path === '/login') return
-
   const auth = useAuthStore()
+  const requestFetch = useRequestFetch()
+
   if (!auth.fetched) {
     // useRequestFetch() forwarde les cookies de la requête entrante côté SSR
-    await auth.fetchMe(useRequestFetch())
+    await auth.fetchMe(requestFetch)
+  }
+
+  async function tryHeaderSso(): Promise<boolean> {
+    try {
+      const providers = await requestFetch<{
+        providers: Array<{ key: string; available: boolean; loginUrl?: string }>
+      }>('/api/auth/providers')
+      const header = providers.providers.find((p) => p.key === 'header' && p.available)
+      if (!header?.loginUrl) return false
+      await requestFetch(header.loginUrl)
+      await auth.fetchMe(requestFetch)
+      return auth.isAuthenticated
+    } catch {
+      return false
+    }
+  }
+
+  if (!auth.isAuthenticated) {
+    await tryHeaderSso()
+  }
+
+  // Already signed in (cookie or just-established header SSO) → leave login page
+  if (to.path === '/login') {
+    if (auth.isAuthenticated) {
+      return navigateTo('/')
+    }
+    return
   }
 
   if (!auth.isAuthenticated) {

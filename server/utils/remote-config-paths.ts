@@ -65,14 +65,16 @@ export function validateSafeSmtpAuthUser(value: string): string | null {
 export function validateSmtpAuthPass(value: string): string | null {
   if (!value) return null
   if (value.length > 512) return 'Mot de passe SMTP trop long'
-  if (/[\r\n\x00]/.test(value)) return 'Mot de passe SMTP invalide'
+  if (value.includes('\r') || value.includes('\n') || value.includes('\0')) {
+    return 'Mot de passe SMTP invalide'
+  }
   return null
 }
 
 // ── NTP server hostnames / IPs (datetime.patch) ──────────────────────────────
 
 function isValidIPv4(ip: string): boolean {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip) && ip.split('.').every(o => parseInt(o, 10) <= 255)
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip) && ip.split('.').every(o => Number.parseInt(o, 10) <= 255)
 }
 
 export function validateNtpServerHost(value: string): string | null {

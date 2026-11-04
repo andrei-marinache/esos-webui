@@ -19,6 +19,7 @@ import { buildMdDetectionSummary, getMdEligibilityReasons } from './raid-md-dete
 import { detectStoppedMdArrays } from './stopped-md-arrays'
 import { extractRaidCliFromToolsOutput, inferRaidCliTool, toolsOutputHasRaidCli } from '../../utils/raid-cli-path'
 import { collectSystemProtectionForOverview, ESOS_SYSTEM_LABELS } from './esos-system-protection'
+import { compareByLocale } from '~/utils/locale-sort'
 
 // ─── Commande bulk ───────────────────────────────────────────────────────────
 
@@ -262,7 +263,7 @@ function flattenDevices(
 ): void {
   for (const dev of devices) {
     const path = dev.path ?? `/dev/${dev.name}`
-    const sizeBytes = typeof dev.size === 'string' ? parseInt(dev.size, 10) : (dev.size ?? 0)
+    const sizeBytes = typeof dev.size === 'string' ? Number.parseInt(dev.size, 10) : (dev.size ?? 0)
     const type = normalizeType(dev.type ?? '')
     const mountpoint = dev.mountpoint ?? undefined
     const fstype = dev.fstype ?? undefined
@@ -461,7 +462,7 @@ function parseDiskById(output: string): Map<string, string[]> {
     const target = match[2]
     const existing = map.get(target) ?? []
     existing.push(link)
-    map.set(target, [...new Set(existing)].sort())
+    map.set(target, [...new Set(existing)].sort(compareByLocale))
   }
   return map
 }
@@ -627,7 +628,7 @@ function buildAlerts(
   for (const arr of mdArrays) {
     if (arr.state === 'degraded' || arr.state === 'failed') {
       alerts.push({
-        severity: arr.state === 'failed' ? 'critical' : 'critical',
+        severity: 'critical',
         code: 'md_array_bad_state',
         params: { path: arr.path, state: arr.state },
         message: `Array ${arr.path} est en état ${arr.state}`,
