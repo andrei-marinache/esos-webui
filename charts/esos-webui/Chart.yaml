@@ -3,7 +3,7 @@ name: esos-webui
 description: Helm chart for ESOS WebUI (Nuxt/Nitro) — read-only SAN visualization for ESOS.
 type: application
 version: 0.1.0
-appVersion: "1.0.10"
+appVersion: "1.0.10-1"
 home: https://github.com/andrei-marinache/esos-webui
 sources:
   - https://github.com/andrei-marinache/esos-webui

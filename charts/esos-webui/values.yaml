@@ -1,9 +1,9 @@
 # ── Image ────────────────────────────────────────────────────────────────────
 # You build & push this yourself (there is no upstream published image).
-#   docker build -t ghcr.io/andrei-marinache/esos-webui:1.0.10 . && docker push ...
+#   docker build -t ghcr.io/andrei-marinache/esos-webui:1.0.10-1 . && docker push ...
 image:
   repository: ghcr.io/andrei-marinache/esos-webui
-  tag: ""            # defaults to .Chart.appVersion (1.0.10) when empty
+  tag: ""            # defaults to .Chart.appVersion (1.0.10-1) when empty
   pullPolicy: IfNotPresent
 imagePullSecrets: []  # e.g. [{ name: ghcr-creds }] for a private GHCR package
 
